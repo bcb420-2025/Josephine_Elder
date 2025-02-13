@@ -1,0 +1,375 @@
+---
+title: "Assignment 1"
+author: "Josephine Elder"
+date: "February 11, 2025"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc-depth: 2
+bibliography: A1_citations.BIB
+---
+R packages used in this report include GEOquery [@geoquery], edgeR [@edger] and biomaRt [@biomart1] [@biomart2].
+
+```{r include = FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("GEOquery")
+library("GEOquery")
+
+library("edgeR")
+library("biomaRt")
+```
+# Introduction
+Epstein-Barr virus (EBV) is a very common virus, with approximately 90% of the human population world wide being infected. EBV is often asymptomatic but can in rare occasions be associated with severe side effects. Notably, it has been found that EBV can be oncogenic, and is associated with several types of cancers [@Yu_Robertson_2023]. Viruses often act to hijack cell machinery, changing gene expression in infected cells, which can be measured through RNA sequencing. Having taken multiple classes discussing the different effects that viruses can have on cells, understanding how viruses can affect expression of the host genome is very interesting to me. The data used in this report is RNAseq data on primary B cells that were transformed into lymphoblastoid cell lines, through EBV infection [@casco2024epstein]. In the study, a dual-fluorescent lytic reporter is used, transforming the wild type EBV to a recombinant version that expresses GFP in early phase of infection and RFP in the later phase of infection. EBV goes through distinct phases in it's infection cycle, which can be determined by the viral proteins that are being expressed [@Hoover_Higginbotham_2025]. 
+The dataset can be found on GEO at [GSE271717](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE271717) [@dataset]
+
+
+# The Dataset
+
+## About the Data
+The data contains several different conditions; 5 cell lines that are wild type, and 3 cell lines that have a BGLF5 gene knockout, in addition to analyzing the RNA from a bulk fraction, the latent stage of infection, the early lytic phase of infection and the late stage of infection for all cells. Each cell line has 40,000 cells that were analyzed[@casco2024epstein].
+
+```{r message = FALSE, include = FALSE}
+data_set_geoid <- "GSE271717"
+gse <- getGEO(data_set_geoid, GSEMatrix = FALSE)
+gse@header$summary
+current_glp1 <- names(GPLList(gse))[1]
+current_glp_info <- Meta(getGEO(current_glp1))
+gse@gsms[[1]]@header$data_processing
+```
+Accession Number: `r current_glp_info$geo_accession` \
+Platform: `r current_glp_info$title` \
+Organism: `r current_glp_info$organism` \
+Date Submitted: `r current_glp_info$submission_date` \
+
+
+## Getting the Data
+The supplementary material associated with the data was retrieved using `getGEOSuppFiles`. Only one `.tar` file was present, which was then downloaded. The `untar` function was used to access the files stored within the tar file, showing separate files for gene level and isoform level expression for each sample. 
+```{r message = FALSE}
+# Get the name of the supplementary files
+sfilenames = getGEOSuppFiles(data_set_geoid, fetch_files = FALSE)
+
+# Download the supplementary files and untar to get individual files
+data_filename <- sfilenames$fname
+download_dir <- file.path(getwd())
+missing_files <- sfilenames$fname[!unlist(lapply(sfilenames$fname, FUN=function(x) {
+    file.exists(file.path(download_dir, data_set_geoid, x))}))]
+
+if(length(missing_files) > 0){
+    for(i in 1:length(missing_files)){
+        sfiles = getGEOSuppFiles(data_set_geoid, filter_regex = missing_files[i], baseDir = download_dir, fetch_files = TRUE)
+    }
+    untar(tarfile = file.path(getwd(), "GSE271717", "GSE271717_RAW.tar"), exdir = getwd())
+}
+```
+
+## Looking at the Data
+The top file was read in, showing that it contains 63,419 genes and 7 different variables. The file shows the gene and transcript ids, the length of the gene, as well as values for RSEM expected counts, TPM and FPKM.
+```{r message = FALSE}
+# Read in the first file and look at the dimensions of the data as well as the first few lines
+WT_02_genes <- read.table(file.path(getwd(),"GSM8383374_WT_02.genes.results.gz"), header = TRUE, check.names = TRUE)
+dim(WT_02_genes)
+head(WT_02_genes)
+```
+
+The dataset contains multiple different sample conditions, which are summarized in the table below. The sample identifiers were pulled, and characteristics about the sample were put together into a matrix. `gsub` was used to remove reduntant wording in the table.
+```{r message = FALSE}
+# From lecture 4, get the information associated with each of the samples and clean to remove extra words
+list_of_samples <- gse@gsms
+sample_conditions <- do.call(rbind, lapply(list_of_samples, FUN = function(x) {
+    c(x@header$title, x@header$characteristics_ch1)
+}))
+colnames(sample_conditions) <- c("name", "tissue", "cell line", "cell type", "genotype", "fraction")
+
+sample_conditions[, "tissue"] <- gsub(sample_conditions[,"tissue"], pattern = "tissue: ", 
+                                replacement = "")
+sample_conditions[, "cell line"] <- gsub(sample_conditions[,"cell line"], pattern = "cell line: ", 
+                                replacement = "")
+sample_conditions[, "cell type"] <- gsub(sample_conditions[,"cell type"], pattern = "cell type: ", 
+                                replacement = "")
+sample_conditions[, "genotype"] <- gsub(sample_conditions[,"genotype"], pattern = "genotype: ", 
+                                replacement = "")
+sample_conditions[, "fraction"] <- gsub(sample_conditions[,"fraction"], pattern = "fraction: ", 
+                                replacement = "")
+knitr::knit_print(knitr::kable(sample_conditions))
+```
+
+
+## Selecting Samples
+10 samples were selected for further analysis, looking at the 5 wild type cell lines, comparing the gene expression during the latent phase of infection and the late lytic phase of infection, with 5 samples for each condition.
+
+```{r message = FALSE}
+# Final samples that will be used in analysis
+WT_samples <- sample_conditions[sample_conditions[,"genotype"] =="WT",]
+latent_samples <- WT_samples[WT_samples[,"fraction"] == "Latent",]
+late_lytic_samples <- WT_samples[WT_samples[,"fraction"] == "Late lytic",]
+
+# Print a table of the sample characteristics
+final_samples <- sample_conditions[rownames(latent_samples),]
+final_samples <- rbind(final_samples, sample_conditions[rownames(late_lytic_samples),])
+knitr::knit_print(knitr::kable(final_samples))
+```
+
+Each of the corresponding files for the 10 selected samples was then read in, with 5 latent samples and 5 late lytic samples.
+```{r message = FALSE}
+# Read in the data from the samples that will be used
+latent_1 <- read.table(file.path(getwd(), "GSM8383375_WT_03.genes.results.gz"), header = TRUE, check.names = TRUE)
+latent_2 <- read.table(file.path(getwd(), "GSM8383379_WT_08.genes.results.gz"), header = TRUE, check.names = TRUE)
+latent_3 <- read.table(file.path(getwd(), "GSM8383383_WT_13.genes.results.gz"), header = TRUE, check.names = TRUE)
+latent_4 <- read.table(file.path(getwd(), "GSM8383387_WT_18.genes.results.gz"), header = TRUE, check.names = TRUE)
+latent_5 <- read.table(file.path(getwd(), "GSM8383391_WT_23.genes.results.gz"), header = TRUE, check.names = TRUE)
+late_lytic_1 <- read.table(file.path(getwd(), "GSM8383377_WT_05.genes.results.gz"), header = TRUE, check.names = TRUE)
+late_lytic_2 <- read.table(file.path(getwd(), "GSM8383381_WT_10.genes.results.gz"), header = TRUE, check.names = TRUE)
+late_lytic_3 <- read.table(file.path(getwd(), "GSM8383385_WT_15.genes.results.gz"), header = TRUE, check.names = TRUE)
+late_lytic_4 <- read.table(file.path(getwd(), "GSM8383389_WT_20.genes.results.gz"), header = TRUE, check.names = TRUE)
+late_lytic_5 <- read.table(file.path(getwd(), "GSM8383393_WT_25.genes.results.gz"), header = TRUE, check.names = TRUE)
+```
+
+From each of the files, only the gene IDs and the corresponding RSEM read counts were extracted, and then added to a data frame matching by gene id, with the column name indicating the sample. The initial dataset contains count data for the viral genome as well as for spike ins, which were removed from the data as they are not from the human genome. This removed around 200 genes from the dataset, making the total number of human genes analyzed in the data 63,241.
+```{r message = FALSE,}
+# Function to only get the raw expression counts from the data file
+get_gene_counts <- function(x, column_name) {
+    new_data <- data.frame(x[,"gene_id"], x[,"expected_count"])
+    colnames(new_data) <- c("gene_id", column_name)
+    return(new_data)
+}
+# Function to add the counts to existing data frame
+add_gene_counts <- function(x, column_name, full) {
+    new_data <- get_gene_counts(x, column_name)
+    return(merge(full, new_data, by = "gene_id"))
+}
+
+
+all_samples_gene_counts <- data.frame(gene_id = latent_1[,"gene_id"], latent_1 = latent_1[,"expected_count"])
+all_samples_gene_counts <- add_gene_counts(latent_2, "latent_2", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(latent_3, "latent_3", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(latent_4, "latent_4", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(latent_5, "latent_5", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(late_lytic_1, "late_lytic_1", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(late_lytic_2, "late_lytic_2", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(late_lytic_3, "late_lytic_3", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(late_lytic_4, "late_lytic_4", all_samples_gene_counts)
+all_samples_gene_counts <- add_gene_counts(late_lytic_5, "late_lytic_5", all_samples_gene_counts)
+
+# Removing counts mapped to EBV genome and spike ins
+all_samples_gene_counts <- subset(all_samples_gene_counts, grepl("^ENSG", gene_id))
+```
+
+
+## Visualizing Data
+A boxplot was made, visualizing the distribution of counts of all human genes that were measured across each of the samples, prior to any cleaning or normalization of the data. Notably, a large portion of the genes have expression counts of 0, leading to many of the genes having a value of -inf when taking the log, making it difficult to make conclusions about the distribution of the data from the boxplot.
+```{r message = FALSE, warning = FALSE, fig.cap = "A boxplot showing the distribution of log of gene counts for all genes initially in the dataset for each sample. Many of the genes have expression of 0, leading to a inf value in the boxplot." }
+# From lecture 5 visualizing the data in a boxplot
+ebv_expr_data <- data.frame(all_samples_gene_counts[,2:11], row.names = all_samples_gene_counts[,1])
+boxplot(log2(ebv_expr_data), xlab = "Samples", ylab = "log2 counts", range = 2, las = 2, cex = 1, cex.lab = 1, cex.axis = 0.5, main = "Boxplot of Data Before Normalization")
+
+```
+
+To get a better idea of the distribution of the data, a density plot was created. Density data for each sample was plotted together, showing differences in distribution. The plot shows a very uneven and noisy distribution of data. 
+```{r message = FALSE, warning = FALSE, fig.cap = "Visualization of data distribution prior to normalization using a density plot."}
+# From lecture 5 creating a density plot
+
+# Calculate density for each sample
+count_density <- apply(log2(ebv_expr_data), MARGIN = 2, FUN = density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(count_density)) {
+    xlim <- range(c(xlim, count_density[[i]]$x))
+    ylim <- range(c(ylim, count_density[[i]]$y))
+}
+
+# Choose colours and line style for plot
+cols <- rainbow(length(count_density))
+ltys <- rep(1, length(count_density))
+
+# Plot the data
+plot(count_density[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2 counts", main = "Density Plot of Expression Data Prior To Normalization", cex.lab = 1.15)
+for (i in 1: length(count_density)) {
+    lines(count_density[[i]], col=cols[i], lty = ltys[i])
+}
+# Creating a legend
+legend("topright", colnames(log2(ebv_expr_data)), col=cols, lty = ltys, cex = 0.75, merge = TRUE)
+
+```
+
+
+# Cleaning
+
+## Cleaning Data
+Next genes that were very lowly expressed were removed, as it was noted earlier that many genes had very low expression, or often had expression counts of 0. The minimum samples used was 5, half of the total samples present, as it allowed for sufficient removal of lowly expressed genes without removing the entirety of the data. After removing lowly expressed genes, there are 14,007 genes left in the dataset.
+```{r message = FALSE}
+# Filtering out lowly expressed genes by looking at expression across all samples
+min_samples <- 5
+ebv_matrix <- as.matrix(ebv_expr_data)
+keep <-  rowSums(cpm(ebv_matrix) > 1) > min_samples
+filtered_ebv_matrix <- ebv_matrix[keep,]
+```
+
+# Mapping
+The human gene IDs used in the dataset were ensemble IDs with version IDs. Version IDs were removed from the rownames to increase the number of mapped genes. Corresponding HGNC symbols were retrieved using biomaRt. HGNC symbols were merged with the normalized count data by matching ensemble IDs. Of the 14,007 genes from the data, 92 did not map to a corresponding HGNC symbol. The ensembl IDs for those 92 genes have been retired and are no longer in use. Since only a very small portion of the genes did not map to the HGNC symbol, they will be disregarded.
+```{r message = FALSE}
+# From lecture 5
+# Remove the version ID from the ensembl ID
+rownames(filtered_ebv_matrix) <- unlist(lapply(rownames(filtered_ebv_matrix), FUN = function(x){unlist(strsplit(x, split = "\\."))[1]}))
+
+# Using a different mirror
+ensembl <- useEnsembl("ensembl", "hsapiens_gene_ensembl", mirror = "useast")
+
+# Associate ensembl ID with the HGNC symbols
+to_convert <- rownames(filtered_ebv_matrix)
+conversion_stash <- "id_conversion.rds"
+if(file.exists(conversion_stash)) {
+    id_conversion <- readRDS(conversion_stash)
+} else {
+    id_conversion <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"), filters = c("ensembl_gene_id"), values = to_convert, mart = ensembl)
+    saveRDS(id_conversion, conversion_stash)
+}
+
+# Calculating the number of ensembl IDs that are not mapped
+nrow(filtered_ebv_matrix) - length(which(rownames(filtered_ebv_matrix) %in% id_conversion$ensembl_gene_id))
+
+# Merge the data with the ensemble ID to HGNC symbol conversions
+ant_ebv <- merge(id_conversion, filtered_ebv_matrix, by.x = 1, by.y = 0, all.y = TRUE)
+
+# Get the IDs for genes 
+missing_ids_genes <- ant_ebv$ensembl_gene_id[which(is.na(ant_ebv$hgnc_symbol))]
+```
+
+Upon further investigation of the data, there are approximately 1000 other genes that do not map to a HGNC symbol as they do not have a HGNC symbol associated with the gene at all, leading them to be entered into the dataset as `""`. When looking at these ensembl IDs further, they encode for novel transcripts, such as lncRNAs or pseudogenes. As they do not have a corresponding HGNC symbol that exists, they will also be disregarded. Further, these genes are likely constitutively transcribed at very low levels in any cell.
+```{r}
+# Get the total number of unique HGNC symbols to see what is duplicated
+length(unique(ant_ebv$hgnc_symbol))
+# Removing data from ensembl IDs that do not have an HGNC symbol
+ant_ebv <- ant_ebv[!ant_ebv$hgnc_symbol == "",]
+```
+
+After removing genes without HGNC symbols, there were 27 genes that mapped to an HGNC symbol that had already been mapped to. Many of the genes had the exact same expression values for each sample, and were likely exact duplicates of the data. Additionally, the samples in `not_unique` all use a different ensembl ID from what is listed in the HGNC website. Thus the duplicated samples that used the different ensembl ID were removed.
+```{r}
+# Getting the data from duplicates
+not_unique <- ant_ebv[duplicated(ant_ebv$hgnc_symbol),]
+
+# Getting symbols to remove
+symbols_to_remove <- not_unique$ensembl_gene_id
+
+# Removing duplicates
+ant_ebv <- ant_ebv[!ant_ebv$ensembl_gene_id %in% symbols_to_remove,]
+
+# Reformatting to have HGNC symbols as row names
+ant_ebv <- data.frame(ant_ebv[,3:12], row.names = ant_ebv[,2])
+```
+
+## Visualizing After Cleaning and Mapping
+A boxplot of the data after removal of the lowly expressed genes and genes that do not map is much more informative in showing the distribution of data across samples. However, it still shows a difference in the median and quartiles of the data.
+```{r message = FALSE, warning = FALSE, fig.cap = "Boxplot showing distribution of gene counts after removing lowly expressed genes."}
+
+# From lec 5, boxplot after cleaning data
+boxplot(log2(ant_ebv), xlab = "Samples", ylab = "log2 counts", range = 2, las = 2, cex = 1, cex.lab = 1, cex.axis = 0.5, main = "RNASeq Sample Distribution After Low Expression Removal")
+```
+
+A density plot was made again with the cleaned data, showing less noise after the removal of lowly expressed genes.
+```{r message = FALSE, warning = FALSE, fig.cap = "Distribution of gene expression for all samples after the removal of lowly expressed genes"}
+# From lec 5, plotting density after cleaning data
+
+count_density <- apply(log2(ant_ebv), MARGIN = 2, FUN = density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(count_density)) {
+    xlim <- range(c(xlim, count_density[[i]]$x))
+    ylim <- range(c(ylim, count_density[[i]]$y))
+}
+
+plot(count_density[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2-counts", main = "Density Plot of Data After Removal of Lowly Expressed Genes", cex.lab = 1.15)
+for (i in 1: length(count_density)) {
+    lines(count_density[[i]], col=cols[i], lyt = ltys[i])
+}
+legend("topright", colnames(log2(ant_ebv)), col=cols, lty = ltys, cex = 0.75, merge = TRUE)
+```
+
+# Normalizing
+
+## Normalizing Data
+Data was then normalized using `DGEList` from the edgeR package to get TMM values, grouping the samples by their fraction, either latent or late lytic. The normalized counts were then converted into counts per million.
+```{r message = FALSE}
+# TMM normalization grouping by fraction, from lec 5
+
+normalizing <- DGEList(counts = ant_ebv, group = final_samples[,"fraction"])
+normalizing <- calcNormFactors(normalizing)
+normalized_counts <- cpm(normalizing)
+```
+
+
+## Visualizing After Normalization
+
+The boxplot of the normalized read counts now shows that the median between all of the samples are aligned.
+```{r message = FALSE, warning = FALSE, fig.cap = "Boxplot showing distribution of gene counts after normalization."}
+# From lec 5, boxplot of data post normalization
+
+boxplot(log2(normalized_counts), xlab = "Samples", ylab = "log2 counts", range = 2, las = 2, cex = 1, cex.lab = 1, cex.axis = 0.5, main = "RNASeq Sample Distribution After Normalization")
+```
+
+Plotting a density function after normalization shows that the peaks between all of the samples align much better than previously and show less noise than before.
+```{r message = FALSE, warning = FALSE, fig.caption = "Distribution of expression data across all samples after normalization"}
+# From lec 5, density plot post normalization
+
+count_density <- apply(log2(normalized_counts), MARGIN = 2, FUN = density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(count_density)) {
+    xlim <- range(c(xlim, count_density[[i]]$x))
+    ylim <- range(c(ylim, count_density[[i]]$y))
+}
+
+plot(count_density[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2-counts", main = "Density Plot of Expression Data After Normalization", cex.lab = 1.15)
+for (i in 1: length(count_density)) {
+    lines(count_density[[i]], col=cols[i], lyt = ltys[i])
+}
+legend("topright", colnames(log2(normalized_counts)), col=cols, lty = ltys, cex = 0.75, merge = TRUE)
+```
+
+Plotting an MDS plot shows the similarity between the two groups. In this case there is good separation between the two sample groups, indicating that the comparison between latent and late lytic fractions has many differences.
+```{r message = FALSE, fig.cap = "Multidimentional scaling plot showing the difference between expression in the two sample groups"}
+# From lec 5, MDS plot, shows similarity between sample groups
+
+limma::plotMDS(normalizing, labels=NULL, pch = 1, main = "MDS Plot Comparing Latent and Late Lytic Expression", col = c("mediumorchid", "lightblue") [factor(final_samples[,"fraction"])])
+legend("top", legend = levels(factor(final_samples[,"fraction"])), pch = c(1), col = c("mediumorchid", "lightblue"), title = "Sample", bty = "n", cex = 0.75)
+```
+
+A BCV plot was plotted to show the relationship between the biological coefficient of variation and the average gene expression.
+```{r message = FALSE, fig.cap = "Plot showing changes in the biological coefficient of variation by different read counts."}
+# Fron lec 5, BCV plot, shows variation by read counts
+
+ebv_model <- model.matrix(~final_samples[,"fraction"])
+disp <- estimateDisp(normalizing, ebv_model)
+plotBCV(disp, col.tagwise = "black", col.common = "red")
+```
+
+Finally, a mean-variance plot was made, showing the general distribution that the data follows. Looking at the plot, the data all appears to follow the negative binomial distribution well, and there are no clear outliers that can be identified from this plot, thus no outliers were removed. Similarly, in the paper from this dataset, only lowly expressed genes were removed, and no outliers were removed.
+```{r message = FALSE, warning = FALSE, fig.cap = "Visualization of the relationship between the mean and variance. The data matches well with the negative binomial distribution."}
+# From lec 5, mean-var plot shows relationship between mean and variance of data to undertand what distribution it follows, blue line is negative binom
+
+plotMeanVar(disp, show.raw.vars = TRUE, show.tagwise.vars = TRUE, show.ave.raw.vars = TRUE, NBline = TRUE, show.binned.common.disp.vars = TRUE)
+```
+# Final Data
+The final dataset that is produced has HGNC identifiers as the row names, with each of the 10 samples in a different column. TMM normalized counts for each gene by sample is shown in the data. Of the initial 63,419 genes, 12,980 genes were kept for analysis.
+```{r}
+# Finalized data set, looking at the top of data and total number of rows to get total number of genes
+
+final_data <- normalized_counts
+head(final_data)
+nrow(final_data)
+```
+
+
+
+# Questions
+1. Why is the dataset of interest to you? [Introduction]
+2. What are the control and test conditions of the dataset? [About the Data] [Selecting Samples]
+3. How many samples are in each condition of your dataset? [Selecting Samples]
+4. Were there expression values that were not unique for specific genes? How did you handle these? [Mapping]
+5. Were there expression values that could not be mapped to current HUGO symbols? [Mapping]
+6. Where there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed? [Visualizing After Normalization]
+7. How did you handle replicates? [Mapping]
+8. What is the final coverage of your dataset? [Final Data]
+
+# References
