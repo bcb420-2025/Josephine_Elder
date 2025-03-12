@@ -1,0 +1,231 @@
+---
+title: "Assignment 2"
+author: "Josephine Elder"
+date: "March 11, 2025"
+output:
+  html_document:
+    toc: yes
+    fig_caption: yes
+    code_folding: hide
+    df_print: paged
+  html_notebook:
+    toc: yes
+    fig_caption: yes
+bibliography: A2_citations.BIB
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(
+    message = FALSE
+)
+# packages that will be used
+library("edgeR")
+library("ComplexHeatmap")
+library("circlize")
+library("ggplot2")
+library("gprofiler2")
+library("GSA")
+```
+Packages used in this report include `edgeR` [@edger], `ComplexHeatmap` [@chm1] [@chm2], `circlize` [@circlize], `ggplot2` [@ggplot2], `gprofiler2` [@gprofiler] and `GSA` [@GSA].
+
+# Introduction to the Dataset
+
+This dataset was acquired from the GEO database at the accession number [GSE271717](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE271717) [@dataset]. The initial dataset looks at two different cell lines, one wild type and another with a BGLF5 gene knockout. RNA seq data was taken from the cell lines at different time points during infection by Epstein-Barr virus; with a bulk fraction, a latent stage fraction, an early lytic fraction and a late lytic fraction [@casco2024epstein]. From the initial dataset, only the latent and late lytic fraction were compared, lowly expressed genes were removed and ensembl markers were mapped to HGNC symbols. Data was then normalized using DGEList from the edgeR package, grouping the samples by their fraction of either latent or late lytic. The dataset initially contained 63,419 genes and 12,980 genes were kept for downstream analysis.
+
+```{r}
+# Read in normalized data
+data <- read.table("A1_normalized_data.csv", header = TRUE)
+
+# Table describing the samples used
+final_samples <- read.table("final_samples.csv")
+d <- DGEList(counts = data, group = final_samples$fraction)
+```
+
+## MDS Plot of Initial Data
+
+The MDS plot compares the dispersion between the two sample groups [@limma]. From this plot, there is clear separation between the two groups, with all of the late lytic samples clustering together on the right side and all of the latent samples clustering on the left side. This indicates that there may be good differential expression between the two groups. 
+```{r fig.cap="Figure 1: An MDS plot created from the limma package, plotting dispersion between the two fractions that are being analyzed, the late lytic and the latent fractions."}
+# MDS plot comparing the dispersion between the two sample groups
+limma::plotMDS(d, labels=NULL, pch = 1, main = "MDS Plot Comparing Latent and Late Lytic Expression", col = c("mediumorchid", "lightblue") [factor(final_samples[,"fraction"])])
+legend("top", legend = levels(factor(final_samples[,"fraction"])), pch = c(1), col = c("mediumorchid", "lightblue"), title = "Sample", bty = "n", cex = 0.75)
+```
+
+# Differential Gene Expression
+
+A model for differential gene expression as created using the edgeR package [@edger]. This package was used as it is well suited for RNASeq data, which is what was used in this dataset. The Benjamini-Hochberg (BH) correction method was used for multiple hypothesis testing. This was used to control for the false discovery rate, without being overly stringent in the analysis and remove too many genes that may have been important. Out of the 12980 genes, 9584 pass the threshold p-value. Of the 9584 genes that pass the threshold p-value, 9340 passed correction. 
+
+```{r}
+# Model for data
+ebv_model <- model.matrix(~final_samples$fraction)
+
+# Estimate dispersion
+disp <- estimateDisp(d, ebv_model)
+
+# Fit model
+fit <- glmQLFit(disp, ebv_model)
+
+# Differential expression
+latent_v_late <- glmQLFTest(fit, coef = ncol(ebv_model))
+
+# Visualize the output
+knitr::kable(topTags(latent_v_late), type = "html", row.names = TRUE, caption = "Table 1: Quasi-likelihood F-test performed using edgeR package, comparing gene expression between cell lines in latent stage of EBV infection and late lytic stage of EBV infection. Row names represent different genes. For columms, locFC: shows the log2 fold change in expression, logCPM: log2 of counts per million read counts, F: F-value, PValue: P-value, FDR: Benjamini-Hochberg False Discovery Rate")
+```
+
+
+```{r}
+# Get all of the results
+qlf_hits <- topTags(latent_v_late, adjust.method = "BH", sort.by = "PValue", n = nrow(data))
+
+# Number of genes that pass the threshold p-value
+length(which(qlf_hits$table$PValue < 0.05))
+```
+
+
+```{r}
+# Number of genes that pass correction
+length(which(qlf_hits$table$FDR < 0.05))
+```
+
+## Plotting A Heatmap
+A heatmap was created showing the difference in gene expression between the two groups. There is clear up and down regulation of certain genes between the two groups, as is indicated by the blue and red sections, with clustering between the same conditions. The pattern shown on the heatmap aligns with the earlier prediction based on the MDS plot that there would be clear differential expression between the two groups. Given that this experiment was conducted in a cell line, there is less biological variability than there would be from patient samples, making the difference between the groups more distinct. Additionally, all of the biological replicates come from the same cell line, reducing variability within each condition. 
+
+```{r fig.cap= "Figure 2: A heatmap comparing differentially expressed genes in latent fraction compared to late lytic fraction, latent fraction is indicated by a red annotation at the top of the figure, and late lytic fraction is indicated by a light blue annotation at the top of the figure. Upregulated genes show up as red on the heat map, and downregulated genes are shown as blue."}
+
+# Scale data across rows
+data_matrix <- t(scale(t(data)))
+
+# Determine colour scheme for data
+if (min(data_matrix) == 0) {
+    heatmap_col = colorRamp2(c(0, max(data_matrix)), c("white", "red"))
+} else {
+    heatmap_col = colorRamp2(c(min(data_matrix), 0, max(data_matrix)), c("blue", "white", "red"))
+}
+
+# Adding annotations by infection stage
+unique_fraction <- unique(final_samples$fraction)
+fraction_colours <- rainbow(n = 2)
+names(fraction_colours) <- unique_fraction
+
+annotations <- HeatmapAnnotation(df = data.frame(fraction = final_samples$fraction), col = list(fraction = fraction_colours), show_legend = TRUE)
+
+# Get the rows of genes that pass the FDR threshold
+FDR_thresh <- rownames(qlf_hits$table)[qlf_hits$table$FDR < 0.05]
+
+# Make a matrix with the genes that pass the FDR threshold
+FDR_thresh_matrix <- t(scale(t(data_matrix[which(rownames(data_matrix) %in% FDR_thresh),])))
+
+# Plotting the heatmap
+annotated_heatmap <- ComplexHeatmap::Heatmap(as.matrix(FDR_thresh_matrix), top_annotation = annotations, cluster_rows = TRUE, cluster_columns = TRUE, show_row_dend = TRUE, show_column_dend = TRUE, col = heatmap_col, show_column_names = TRUE, show_row_names = FALSE, show_heatmap_legend = TRUE, column_title = "Latent vs Late Lytic in genes passing FDR threshold with annotations")
+annotated_heatmap
+```
+
+## Creating a Volcano Plot
+
+```{r fig.cap= "Figure 3: Volcano plot showing up and down regulated genes. The horizontal blue dashed line indicates a p-value of 0.05, and the right and left vertical dashed lines represent a log2 fold change of 1 and -1 respectively. The most highly up and down regulated genes are labelled on the graph. The 5 most up regulated genes are TMEM35B, CCR6, SDF2L1, FABP5P7 and CCL4L2. The 5 most down regulated genes are TNXB, TANC2, LIMD1-AS1, NHLH1 and DCHS1."}
+
+# Data to plot
+expr_data <- qlf_hits$table
+
+# Get -log10 of p-value, bigger number is more significant
+expr_data$logP <- -log10(expr_data$PValue)
+
+# Get genes that are the most upregulated
+most_up <- expr_data[order(expr_data$logFC, decreasing = TRUE),][1:5,]
+most_up$gene <- row.names(most_up)
+
+# Get genes that are the most downregulated
+most_down <- expr_data[order(expr_data$logFC, decreasing = FALSE),][1:5,]
+most_down$gene <- row.names(most_down)
+
+# Plotting the volcano plot
+ggplot(expr_data, aes(x = logFC, y = logP)) + geom_vline(xintercept = c(-1, 1), col = "blue", linetype = "dashed") + geom_hline(yintercept = -log10(0.05), col = "blue", linetype = "dashed") + geom_point() + geom_text(data = most_up, aes(label = gene), vjust = -0.5, color = "red") + geom_text(data = most_down, aes(label = gene), vjust = -0.5, color = "purple") + labs(title = "Volcano Plot Showing Up and Down Regulated Genes", x = "Log2 Fold Change", y = "-Log10 p-value")
+```
+
+The volcano plot shows the different up and down regulated genes, with dashed lines indicating log2 fold change of 1 or -1, and a p-value of 0.05. In total, 6453 genes are upregulated, while 2887 genes are downregulated. Of those genes, 5220 are up regulated with a fold change of 1 or greater, and 2200 are down regulated with a fold change of -1 or greater. The 5 most up regulated and down regulated genes are indicated on the plot. The most up regulated genes being `r most_up$gene` and the most down regulated genes being `r most_down$gene`. Interestingly, two of the upregulated genes are CCR6 and CCL4L2, which are pro-inflammatory cytokines involved in activating the immune system and could be related to viral infection [@CCR6] [@CCL4L2]. Some downregulated genes of interest are NHLH1, a transcription factor that is important in growth and development, and DCHS1, a member of the cadherin that encodes cell-cell adhesion molecules [@NHLH1] [@DCHS1].
+
+```{r}
+# Get the number of genes that are upregulated
+length(which(qlf_hits$table$FDR < 0.05 & qlf_hits$table$logFC > 0))
+
+# Get the number of downregulated genes
+length(which(qlf_hits$table$FDR < 0.05 & qlf_hits$table$logFC < 0))
+
+```
+
+```{r}
+
+# Creating list of upregulated genes
+upregulated_genes <- row.names(qlf_hits$table[which(qlf_hits$table$FDR < 0.05 & qlf_hits$table$logFC >= 1),])
+length(upregulated_genes)
+
+# Create list of downregulated genes
+downregulated_genes <- row.names(qlf_hits$table[which(qlf_hits$table$FDR < 0.05 & qlf_hits$table$logFC <= -1),])
+length(downregulated_genes)
+```
+
+
+# Threshold Over-representation Analysis
+Threshold over-representation analysis was conducted using g:Profiler [@gprofiler] and the GSA package [@GSA]. The GO biological pathway annotation was used to get different gene sets. The paper associated with the data set makes reference to different biological processes, so using the GO:BP annotation allows for easier comparison than using specific molecular components or cellular components [@casco2024epstein]. Much of the change in expression is attributed to host shutoff, a strategy used by some viruses to supress host cell transcription in order to facilitate virus production [@hostshutoff]. In the case of Epstein-Barr virus, it tends to prevent host protein synthesis, increase nuclear retention of mRNA transcripts and host mRNA degradation [@ebvhs]. Additionally, cellular stress and antiviral responses may also have an effect in differential expression and host shutoff [@casco2024epstein]. \\Lists for up and down regulated genes were created to do over-representation analysis on up or down regulated genes only. All genes had a FDR of < 0.05 to be significant, and a log2 fold change of at least 1 or -1. Using a list with all differentially expressed genes where the FDR < 0.05, 1074 gene sets were found to be significant.
+```{r}
+
+diff_exp_genes <- FDR_thresh
+
+profiler_version <- get_version_info(organism="hsapiens")
+GO_annotation_version <- profiler_version$sources$`GO:BP`$version
+
+# Run gprofiler on set of all differentially expressed genes
+gprofiler_results <- gost(query = diff_exp_genes, significant = FALSE, ordered_query = FALSE, exclude_iea = TRUE, correction_method = "fdr", organism = "hsapiens", source = c("GO:BP"))
+
+# Results for all differentially expressed genes
+all_genes_results <- gprofiler_results$result
+
+# Visualize the results
+knitr::kable(all_genes_results[1:10,], type = "html", caption = "Table 2: Results from threshold over-representation analysis on a list of all differentially expressed genes using g:Profiler with gene ontology biological pathway annotations.")
+```
+
+
+```{r}
+# Number of significant hits
+nrow(all_genes_results[all_genes_results$significant == TRUE,])
+```
+## Upregulated Genes
+Over-representation analysis was also conducted on a list of genes that were upregulated, with an FDR < 0.05 and a log2 fold change of > 1. In total 1020 gene sets were found to be significant. Many of the gene sets are related to metabolism, protein and cellular localization, cellular stress response and DNA damage responses. 
+```{r}
+# Run gprofiler on set of upregulated genes
+gprofiler_up <- gost(query = upregulated_genes, significant = FALSE, ordered_query = FALSE, exclude_iea = TRUE, correction_method = "fdr", organism = "hsapiens", source = c("GO:BP"))
+
+# Results for upregulated genes
+upregulated_results <- gprofiler_up$result
+
+
+# Visualize the results
+knitr::kable(upregulated_results[1:10,], type = "html", caption = "Table 3: Results from threshold over-representation analysis on a list of upregulated genes with a fold change greater than 2,using g:Profiler with gene ontology biological pathway annotations.")
+```
+
+```{r}
+nrow(upregulated_results[upregulated_results$significant == TRUE,])
+
+```
+
+## Downregulated Genes
+Similarly, over-representation analysis was conducted on a list of genes that were downregulated, with an FDR < 0.05 and a log2 fold change of < -1. In total 48 gene sets were found, with many sets involved in regulation of transcription and translation, gene expression, as well as cell projection and morphogenesis.
+```{r}
+# Run gprofiler on set of downregulated genes
+gprofiler_down <- gost(query = downregulated_genes, significant = FALSE, ordered_query = FALSE, exclude_iea = TRUE, correction_method = "fdr", organism = "hsapiens", source = c("GO:BP"))
+
+# Results for all differentially expressed genes
+downregulated_results <- gprofiler_down$result
+
+# Visualize the results
+knitr::kable(downregulated_results[1:10,], type = "html", caption = "Table 4: Results from threshold over-representation analysis on a list of downregulated genes with a fold change greater than 2,using g:Profiler with gene ontology biological pathway annotations.")
+```
+
+```{r}
+nrow(downregulated_results[downregulated_results$significant == TRUE,])
+```
+
+# Conclusion
+In total, 9340 genes were determined to be differentially expressed as the had an FDR value of less than 0.05. Of those genes, 6453 were upregulated, while 2887 were downregulated. After conducting over-representation analysis on the list of all differentially expressed genes, 1074 gene sets were found to be significantly over-represented. Many of the top gene sets were associated with metabolism, biosynthesis and cellular stress. Conducting over-representation analysis with only upregulated genes returned 1020 gene sets that were over-represented. They were associated with metabolism, protein and cellular localization, cellular stress response and DNA damage response. These may be related to host response to the virus, especially with cellular stress and DNA damage responses. Protein and cellular localization is also affected by virual host shutoff, and may be responsible for the upregulation of those genes. When conducting over-representation analysis with only downregulated genes, 48 gene sets were found. These gene sets were involved in regulation of transcription and translation, gene expression, cell projection and morphogenesis. These may also be related to host shutoff, with decreased regulation of transcription and translation aiding in viral genome replication, and reduced gene expression of host genes also allowing the virus to take over replication machinery. 
+
+
+# Bibliography
