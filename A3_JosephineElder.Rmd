@@ -1,0 +1,111 @@
+---
+title: "Assignment 3"
+author: "Josephine Elder"
+date: "April 1, 2025"
+output:
+  html_document:
+    toc: yes
+    fig_caption: yes
+    code_folding: hide
+    df_print: paged
+  html_notebook:
+    toc: yes
+    fig_caption: yes
+bibliography: A3_citations.BIB
+---
+
+# Introduction
+This dataset was acquired from the GEO database at the accession number [GSE271717](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE271717) [@dataset]. The data set looks at RNA seq data from cell lines at different time points during infection by Epstein-Barr virus. Using fluorescent proteins and flow cytometry, cells were sorted into different stages of infection, with a bulk fraction, a latent stage fraction, an early lytic fraction and a late lytic fraction being separately sequenced [@casco2024epstein]. Only the latent and the late lytic RNAseq data was used for downstream analysis. Gene expression was compared between the two fractions, and lowly expressed genes were removed. Genes were mapped to their corresponding HGNC symbols and the data was then normalized to the negative binomial distribution using DGEList from the edgeR package. After cleaning and normalization, 12,980 genes were kept for downstream analysis. Differential gene expression was calculated using edgeR using the Benjamini-Hochberg correction method for multiple hypothesis testing. 9340 genes passed correction with an FDR threshold of FDR < 0.05. Threshold over representation analysis was then conducted using g:Profiler with the GO biological processes annotation. Analysis was conducted on a list of all differentially expressed genes, as well as up and down regulated genes. Upregulated genes were associated with metabolism, protein and cellular localization, cellular stress response and DNA damage response. In contrast, downregulated genes were associated with regulation of transcription and translation, gene expression, cell projection and morphogenesis.
+
+# Non-thresholded Gene set Enrichment Analysis
+Non-thresholded gene set enrichment analysis (GSEA) was conducted on a ranked list of genes from the list of differentially expressed genes that was previously produced. This was done so that the analysis would not discoun other genes that may still be invovled in pathways that are up or down regulated but are not at the extremes of the list. The geneset used for the analysis is the Bader lab geneset, using GO biological processes annotations without inferred electronic annotation from March 01 2025. In keeping with previous analyses, the GO biological processes annotation was used, as it would be most informative about specific biolgical pathways that are being affected, which are discussed in the original article [@casco2024epstein]. It is also known that different biological pathways can be affected by viruses in different ways. \ Some of the top gene sets that were found from GSEA were involved in proteosome degradation, hallmark Myc targets, mitochondrial translation, proteosome assembly and oxidative phosphorylation. There is not much overlap between the ORA results and the GSEA results, although there is overlap with upregulation of metabolism from ORA and oxidative phosphorylation in GSEA, as oxidative phosphorylation is a key part of cell metabolism. It is interesting to note that hallmark Myc targets was one of the genesets found, as Myc is highly associated with regulation of the viral cycle in EBV, with high level of Myc during the latent stage, and lower levels of Myc activating the lytic cycle [@guo2020myc]. Additionally, the presence of proteosome degradation and proteosome assembly may be linked to EBV, as the EBV latent membrane protein 1 (LMP1) is targeted for proteosome degradation via the ubiquitin-proteosome pathway [@aviel2000degradation].
+
+```{r eval = FALSE}
+# Read in the qlf hits from A2
+rank_file <- read.csv("A2_qlf_hits.csv")
+colnames(rank_file)[1] <- "HGNC"
+```
+
+
+```{r eval = FALSE}
+# Create a rank list of genes
+rank_file[,"rank"] <- -log(rank_file$PValue, base = 10) * sign(rank_file$logFC)
+rank_file <- rank_file[order(rank_file$rank, decreasing = TRUE),]
+rank_file <- rank_file[c(1, 7)]
+write.table(rank_file, "rank_file.rnk",sep = "\t", row.names = FALSE, col.names = FALSE)
+#install required R and bioconductor packages
+tryCatch(expr = { library("RCurl")}, 
+         error = function(e) {  
+           install.packages("RCurl")}, 
+         finally = library("RCurl"))
+
+gsea_jar <- "~/GSEA_4.3.2/gsea-cli.sh"
+
+# Get gmt files 
+gmt_url = "https://download.baderlab.org/EM_Genesets/current_release/Human/symbol/"
+filenames <- getURL(gmt_url)
+tc = textConnection(filenames)
+contents = readLines(tc)
+close(tc)
+  
+# Using go BP without IEA
+rx = gregexpr("(?<=<a href=\")(.*.GOBP_AllPathways_noPFOCR_no_GO_iea.*.)(.gmt)(?=\">)",
+  contents, perl = TRUE)
+gmt_file = unlist(regmatches(contents, rx))
+output_dir <- getwd()
+
+dest_gmt_file <- file.path(getwd(),gmt_file )
+
+# Check to see if file is already downloaded
+if(!file.exists(dest_gmt_file)) {
+  download.file(paste(gmt_url, gmt_file, sep = ""), destfile = dest_gmt_file)
+
+}
+
+
+command <- paste("",gsea_jar,  
+                   "GSEAPreRanked -gmx", dest_gmt_file, 
+                   "-rnk" , file.path(getwd(), "rank_file.rnk"), 
+                   "-collapse false -nperm 1000 -scoring_scheme weighted", 
+                   "-rpt_label ","EBV_GSEA_Analysis",
+                   "  -plot_top_x 20 -rnd_seed 12345  -set_max 200",  
+                   " -set_min 15 -zip_report false ",
+                   " -out" ,output_dir, 
+                   " > gsea_output.txt",sep=" ")
+system(command)
+```
+
+
+# Cytoscape
+An enrichment map of the GSEA data was made in cytoscape with thresholds for the nodes of having a Q-value less than 0.001 and an edge cutoff of 0.375. With these thresholds in place, there were 195 nodes and 4111 edges in the pathway. The initial enrichment map is shown in Figure 1. Automatic annotation were made using the autoannotate features, where clusters were formed by selecting “choose amount of clusters” and keeping the slider in the middle. Additionally, the node with the most significant FDR value is labeled and shown in pink, shown in Figure 2. Clusters were further grouped into major themes that included: RNA and protein processing, virus associated genes, oncogene activity, mitochondrial activity and ubiquitination, shown in Figure 3.
+
+```{r fig.cap ="Figure 1: Enrichment map made in cytoscape without any changes made by manual layout. Thresholds for nodes was Q-value < 0.001 and edge cutoff of 0.375."}
+knitr::include_graphics(file.path(getwd(), "A3_Figures", "Figure_1.png"))
+
+```
+
+```{r fig.cap= "Figure 2: Enrichment map made in cytoscape with annotations added by AutoAnnotate. Clusters were made using the `choose amount of clusters` option and setting the slider in the middle. Nodes with the most significantl FDR value from each cluster are labeled and coloured pink."}
+knitr::include_graphics(file.path(getwd(), "A3_Figures", "Figure_2.png"))
+
+```
+
+
+Results from the enrichment maps in Figure 2 and 3 show similar findings from the initla gene sets that were found with GSEA earlier. There is further evidence of an association with ubiquitination, which may be from an EBV protein being targeted by the host cell [@aviel2000degradation]. There is also a group of nodes that are transcriptional targets to Myc, and may be involved in changing levels of Myc, and in turn, affecting the different life cycles of the virus [@guo2020myc]. Additionally, it has been found that EBV upregulates oxidative phosphorylation in cells in order to help it proliferate. This is further related to Myc as this upregulation is done through Myc [@muller2025epstein]. Myc is also an oncogene, which may account for the increased presence of oncogene activity.
+
+```{r "Figure 3: Enrichment map made in cytoscape with annotations made by AutoAnnotate and clusters further grouped into general themes."}
+knitr::include_graphics(file.path(getwd(), "A3_Figures", "Figure_3.png"))
+
+```
+
+
+# Specific pathway
+The oxidative phosphorylation because it is an important step in cell metabolism. Upregulation in metabolism was found during the over-representation analysis, and gene sets for oxidative phosphorylation were found during GSEA, indicating that it is an important pathway during EBV infection. The oxidative phosphorylation pathway was imported from WikiPathways [@agrawal2024wikipathways] [@pathway]. Gene expression data was used to annotate the pathway, where red indicates upregulation, and blue indicates downregulation. The borders of each box represents the p-values, ranging from red to purple to represent low to high p-values respectively. In general, there seems to be lots of upregulation in genes related to the nicotinamide nucleotide transhydrogenase enzyme, which helps drive the pathway forwards, ultimately leading to increase ATP production and oxidative phosphorylation. This result ligns up with findings from literature, where oxidative phosphorylation is upregulated in cells that are infected by EBV [@muller2025epstein].
+
+```{r fig.cap="Figure 4: Oxidative phosphorylation pathway from WikiPathways, with expression data annotations. Upregulated genes are shown in red while downregulated genes are shown in blue, with p-values indicated by border colour ranging from red to purple indicating low to high p-values respectively."}
+knitr::include_graphics(file.path(getwd(), "A3_Figures", "Figure_4.png"))
+
+```
+
+
+
+# References
